@@ -10,16 +10,78 @@ A Python implementation of DecontX for removing ambient RNA contamination from s
 DecontX is a Bayesian method to estimate and remove cross-contamination from ambient RNA in droplet-based single-cell RNA-seq data. This Python implementation provides near-perfect parity with the original R version (correlation > 0.999) while enabling pure Python workflows without R dependencies.
 
 **Key Features:**
-- 🐍 Pure Python implementation (no R required)
-- 🔬 Seamless scanpy integration
-- ⚡ Numba-accelerated performance
-- 📊 Bayesian contamination estimation per cell
-- 🎯 Validated against original R implementation
+- Pure Python implementation (no R required)
+- Seamless scanpy integration
+- Numba-accelerated performance
+- Bayesian contamination estimation per cell
+- Validated against original R implementation
+
+## What's New
+
+This github fork substantially improves performance and code quality while
+preserving numerical accuracy.
+
+### Performance
+
+- **CSR-aligned sparse EM**: native counts are kept as a 1D array (`nc_data`)
+  aligned to CSR nonzeros (length nnz), never densified into an
+  `n_cells x n_genes` matrix. The M-step scatter-adds from CSR positions
+  into `phi_acc` — all in JIT Numba, no Python/BLAS overhead.
+- **Bit-identical results** to the original dense implementation
+  (theta_diff = 0.0, correlation = 1.0).
+- **Benchmark speedups** (original dense vs CSR-aligned optimized):
+
+  | Cells | Genes | Density | Original | Optimized | Speedup |
+  |-------|-------|---------|----------|-----------|---------|
+  | 500 | 500 | 15% | 0.11s | 0.009s | 12x |
+  | 5,000 | 3,000 | 8% | 12.8s | 0.11s | 113x |
+  | 10,000 | 5,000 | 5% | 31.0s | 0.23s | 134x |
+
+- Memory: `nc_data` is ~14x smaller than dense `native_counts`
+  (9 MB vs 120 MB for 5k x 3k at 8% density).
+- Output is a sparse CSR matrix (same sparsity pattern as input).
+- Numba JIT compilation is lazy (compiles on first `decontx()` call,
+  not at import time). Call `decontx.fast_ops.precompile()` to pre-warm.
+
+### Code quality
+
+- Removed ~700 lines of dead code across `fast_ops.py`, `utils.py`,
+  `core.py`, and `model.py`.
+- Fixed the delta metadata bug: `adata.uns['decontX']['parameters']['delta']`
+  now stores the fitted delta, not the input prior.
+- Fixed multi-batch output: sparse batch results are stacked with
+  `scipy.sparse.vstack` instead of densified into a zero-filled array.
+- Fixed the single-cluster division-by-zero edge case in the eta update.
+- Fixed `test_core.py` (wrong key casing, missing cluster column).
+- Lazy JIT compilation: import-time compilation removed; first call compiles.
+- Ruff lint and format pass clean on all files.
+
+### Acknowledgments
+
+The following architectural improvements were adopted from
+[jjia1/decontx-python](https://github.com/jjia1/decontx-python):
+
+- Keeping native counts as a 1D array (`nc_data`) aligned to CSR nonzeros
+  instead of a dense `n_cells x n_genes` matrix.
+- Scatter-add M-step: accumulating `nc_data` directly into `phi_acc` in JIT
+  instead of Python-level boolean masking or GEMM.
+- Computing eta from `global_acc - phi_acc[k]` instead of summing over an
+  `other_mask`.
+- Combining the E-step and M-step into a single monolithic Numba function call.
+- Returning decontaminated counts as a sparse CSR matrix with the same
+  sparsity pattern as the input.
+- The overall "keep everything CSR" approach: convert all input to CSR
+  upfront and never densify during the EM loop.
+
+We thank the author for these improvement ideas, which made the
+optimization possible.
+
 
 ## Installation
 
 ```bash
-pip install decontx-python
+# Latest development version from GitHub
+pip install git+https://github.com/NiRuff/decontx-python.git
 ```
 
 ## Quick Start
@@ -133,52 +195,6 @@ contamination = decontx.get_decontx_contamination(adata)
 sim_data = decontx.simulate_contamination(n_cells=1000, n_genes=2000)
 ```
 
-## What's New
-
-This release substantially improves performance and code quality while
-preserving numerical accuracy.
-
-### Performance
-
-- **CSR-aligned sparse EM**: native counts are kept as a 1D array (`nc_data`)
-  aligned to CSR nonzeros (length nnz), never densified into an
-  `n_cells x n_genes` matrix. The M-step scatter-adds from CSR positions
-  into `phi_acc` — all in JIT Numba, no Python/BLAS overhead.
-- **Bit-identical results** to the original dense implementation
-  (theta_diff = 0.0, correlation = 1.0).
-- **Benchmark speedups** (original dense vs CSR-aligned optimized):
-
-  | Cells | Genes | Density | Original | Optimized | Speedup |
-  |-------|-------|---------|----------|-----------|---------|
-  | 500 | 500 | 15% | 0.11s | 0.009s | 12x |
-  | 5,000 | 3,000 | 8% | 12.8s | 0.11s | 113x |
-  | 10,000 | 5,000 | 5% | 31.0s | 0.23s | 134x |
-
-- Memory: `nc_data` is ~14x smaller than dense `native_counts`
-  (9 MB vs 120 MB for 5k x 3k at 8% density).
-- Output is a sparse CSR matrix (same sparsity pattern as input).
-- Numba JIT compilation is lazy (compiles on first `decontx()` call,
-  not at import time). Call `decontx.fast_ops.precompile()` to pre-warm.
-
-### Code quality
-
-- Removed ~700 lines of dead code across `fast_ops.py`, `utils.py`,
-  `core.py`, and `model.py`.
-- Fixed the delta metadata bug: `adata.uns['decontX']['parameters']['delta']`
-  now stores the fitted delta, not the input prior.
-- Fixed multi-batch output: sparse batch results are stacked with
-  `scipy.sparse.vstack` instead of densified into a zero-filled array.
-- Fixed the single-cluster division-by-zero edge case in the eta update.
-- Fixed `test_core.py` (wrong key casing, missing cluster column).
-- Lazy JIT compilation: import-time compilation removed; first call compiles.
-- Ruff lint and format pass clean on all files.
-
-### Acknowledgments
-
-The CSR-aligned `nc_data` architecture and scatter-add M-step were inspired
-by [jjia1/decontx-python](https://github.com/jjia1/decontx-python). We thank
-the author for the improvement ideas that made this optimization possible.
-
 ## Integration with Existing Workflows
 
 DecontX fits naturally into scanpy workflows:
@@ -205,12 +221,6 @@ If you use DecontX in your research, please cite:
 
 > Yang, S., Corbett, S.E., Koga, Y. et al. Decontamination of ambient RNA in single-cell RNA-seq with DecontX. Genome Biol 21, 57 (2020). https://doi.org/10.1186/s13059-020-1950-6
 
-## Issues and Support
-
-- 🐛 Report bugs: [GitHub Issues](https://github.com/yourusername/decontx-python/issues)
-- 📖 Documentation: [Read the Docs](https://decontx-python.readthedocs.io)
-- 💬 Questions: [GitHub Discussions](https://github.com/yourusername/decontx-python/discussions)
-
 ## License
 
-MIT License - see LICENSE file for details.
+MIT License
