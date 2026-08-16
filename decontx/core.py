@@ -23,6 +23,7 @@ def decontx(
     seed: int = 12345,
     copy: bool = False,
     verbose: bool = True,
+    compute_log_likelihood: bool = True,
 ) -> Optional[AnnData]:
     """Remove ambient RNA contamination from single-cell RNA-seq data.
 
@@ -75,6 +76,7 @@ def decontx(
             convergence,
             seed,
             verbose,
+            compute_log_likelihood,
         )
     else:
         if verbose:
@@ -89,12 +91,18 @@ def decontx(
             convergence,
             seed,
             verbose,
+            compute_log_likelihood,
         )
         results = {"all": result}
 
     _store_results(adata, results, z_labels, cluster_key, batch_key)
 
-    fitted_delta = results.get("all", {}).get("delta", delta)
+    if "all" in results:
+        fitted_delta = results["all"]["delta"]
+    else:
+        fitted_delta = np.mean(
+            [np.asarray(r["delta"]) for r in results.values()], axis=0
+        )
     if not isinstance(fitted_delta, np.ndarray):
         fitted_delta = np.asarray(fitted_delta)
 
@@ -175,6 +183,7 @@ def _process_batches(
     convergence: float,
     seed: int,
     verbose: bool,
+    compute_log_likelihood: bool,
 ) -> dict:
     """Process each batch separately."""
     batch_results = {}
@@ -202,6 +211,7 @@ def _process_batches(
             convergence,
             seed,
             verbose=False,
+            compute_log_likelihood=compute_log_likelihood,
         )
 
         result["batch_indices"] = batch_indices
@@ -224,6 +234,7 @@ def _run_decontx_single(
     convergence: float,
     seed: int,
     verbose: bool = True,
+    compute_log_likelihood: bool = True,
 ) -> dict:
     """Run DecontX on a single batch."""
     model = DecontXModel(
@@ -233,6 +244,7 @@ def _run_decontx_single(
         convergence=convergence,
         seed=seed,
         verbose=verbose,
+        compute_log_likelihood=compute_log_likelihood,
     )
 
     result = model.fit_transform(X, z_labels)

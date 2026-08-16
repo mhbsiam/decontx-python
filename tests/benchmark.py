@@ -81,7 +81,7 @@ def benchmark_one(n_cells, n_genes, n_clusters=5, density=0.10, max_iter=100):
     print(f"\n{'=' * 60}")
     print(f"Dataset: {n_cells} cells x {n_genes} genes, {n_clusters} clusters")
     print(f"Non-zeros: {nnz:,} ({density_actual:.1%} density)")
-    print(f"EM iterations: {len(res['log_likelihood'])}")
+    print(f"EM iterations: {res['n_iter']}")
     print(f"{'-' * 60}")
     print(f"Time:    {elapsed:.3f}s")
     print(f"Mean contamination: {res['contamination'].mean():.3f}")
@@ -92,7 +92,7 @@ def benchmark_one(n_cells, n_genes, n_clusters=5, density=0.10, max_iter=100):
         "nnz": nnz,
         "density": density_actual,
         "time": elapsed,
-        "n_iter": len(res["log_likelihood"]),
+        "n_iter": res["n_iter"],
     }
 
 

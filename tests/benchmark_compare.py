@@ -134,7 +134,7 @@ out = {{
     'elapsed': elapsed,
     'theta_mean': float(res['theta'].mean()),
     'contam_mean': float(res['contamination'].mean()),
-    'n_iter': len(res['log_likelihood']),
+    'n_iter': res.get('n_iter', len(res.get('log_likelihood_history', res.get('log_likelihood', [])))),
     'theta_first5': res['theta'][:5].tolist(),
     'contam_first5': res['contamination'][:5].tolist(),
 }}
@@ -145,7 +145,7 @@ print(json.dumps(out))
 
 
 def main():
-    mine_path = "/home/siamsoha/Downloads/decontx-python-master"
+    mine_path = "/home/siamsoha/Documents/SIAM/Github/decontx-python"
     jjia1_path = (
         "/home/siamsoha/Downloads/decontx-python-master_jjia1/decontx-python-master"
     )

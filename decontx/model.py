@@ -21,6 +21,7 @@ class DecontXModel:
         self.delta = np.array(kwargs.get("delta", [10.0, 10.0]))
         self.estimate_delta = kwargs.get("estimate_delta", True)
         self.iter_loglik = kwargs.get("iter_loglik", 10)
+        self.compute_log_likelihood = kwargs.get("compute_log_likelihood", True)
         self.seed = kwargs.get("seed", 12345)
         self.verbose = kwargs.get("verbose", True)
 
@@ -40,6 +41,12 @@ class DecontXModel:
         n_cells, n_genes = X_csr.shape
         z = np.ascontiguousarray(z, dtype=np.int32)
         n_clusters = len(np.unique(z))
+
+        # Remap z to 1..n_clusters so sparse indexing is always in range.
+        unique = np.unique(z)
+        if unique[0] != 1 or unique[-1] != n_clusters or len(unique) != n_clusters:
+            label_map = {label: i + 1 for i, label in enumerate(unique)}
+            z = np.array([label_map[x] for x in z], dtype=np.int32)
 
         counts_indptr = np.ascontiguousarray(X_csr.indptr, dtype=np.int64)
         counts_indices = np.ascontiguousarray(X_csr.indices, dtype=np.int64)
@@ -78,14 +85,18 @@ class DecontXModel:
                 eta = np.tile(eta_bg, (n_clusters, 1))
 
         log_likelihood_history = []
+        n_iter = 0
         estimate_eta = X_background is None
         pseudocount = 1e-20
 
         # Pre-allocate buffers. Reuse across all EM iterations.
         nc_data = np.zeros(nnz, dtype=np.float64)
         phi_acc = np.zeros((n_clusters, n_genes), dtype=np.float64)
+        native_sums = np.zeros(n_cells, dtype=np.float64)
+        global_acc = np.zeros(n_genes, dtype=np.float64)
 
         for iteration in range(self.max_iter):
+            n_iter = iteration + 1
             theta_old = theta.copy()
 
             theta, phi, eta, delta_new, contamination = decontx_em_exact_sparse(
@@ -104,6 +115,8 @@ class DecontXModel:
                 self.delta.copy(),
                 nc_data,
                 phi_acc,
+                native_sums,
+                global_acc,
                 pseudocount,
             )
 
@@ -111,28 +124,35 @@ class DecontXModel:
                 self.delta = delta_new
 
             if iteration % self.iter_loglik == 0:
-                log_lik = decontx_log_likelihood_exact_sparse(
-                    counts_data,
-                    counts_indices,
-                    counts_indptr,
-                    n_cells,
-                    n_genes,
-                    theta,
-                    eta,
-                    phi,
-                    z,
-                    pseudocount,
-                )
-                log_likelihood_history.append(log_lik)
+                if self.compute_log_likelihood:
+                    log_lik = decontx_log_likelihood_exact_sparse(
+                        counts_data,
+                        counts_indices,
+                        counts_indptr,
+                        n_cells,
+                        theta,
+                        eta,
+                        phi,
+                        z,
+                        pseudocount,
+                    )
+                    log_likelihood_history.append(log_lik)
 
                 theta_change = np.max(np.abs(theta - theta_old))
 
                 if self.verbose and iteration % 10 == 0:
-                    print(
-                        f"Iter {iteration}: LL={log_lik:.1f}, "
-                        f"change={theta_change:.4f}, "
-                        f"mean_contam={(1 - theta.mean()):.3f}"
-                    )
+                    if self.compute_log_likelihood and log_likelihood_history:
+                        print(
+                            f"Iter {iteration}: LL={log_likelihood_history[-1]:.1f}, "
+                            f"change={theta_change:.4f}, "
+                            f"mean_contam={(1 - theta.mean()):.3f}"
+                        )
+                    else:
+                        print(
+                            f"Iter {iteration}: "
+                            f"change={theta_change:.4f}, "
+                            f"mean_contam={(1 - theta.mean()):.3f}"
+                        )
 
                 if theta_change < self.convergence_threshold:
                     if self.verbose:
@@ -168,5 +188,6 @@ class DecontXModel:
             "eta": eta,
             "delta": self.delta,
             "z": z,
-            "log_likelihood": log_likelihood_history,
+            "log_likelihood_history": log_likelihood_history,
+            "n_iter": n_iter,
         }

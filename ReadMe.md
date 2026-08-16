@@ -42,6 +42,9 @@ preserving numerical accuracy.
 - Output is a sparse CSR matrix (same sparsity pattern as input).
 - Numba JIT compilation is lazy (compiles on first `decontx()` call,
   not at import time). Call `decontx.fast_ops.precompile()` to pre-warm.
+- Optional `compute_log_likelihood=False` gives an additional ~25–40 %
+  speedup when the log-likelihood history is not needed, with no change to
+  contamination, theta, phi, eta, or decontaminated counts.
 
 ### Code quality
 
@@ -51,7 +54,12 @@ preserving numerical accuracy.
   now stores the fitted delta, not the input prior.
 - Fixed multi-batch output: sparse batch results are stacked with
   `scipy.sparse.vstack` instead of densified into a zero-filled array.
+- Fixed multi-batch cluster indexing: each batch's cluster labels are now
+  remapped to a contiguous `1..n_clusters` range internally, preventing
+  out-of-bounds writes when a batch contains only a subset of the global
+  clusters.
 - Fixed the single-cluster division-by-zero edge case in the eta update.
+- Added division-by-zero guards in the theta and delta precision updates.
 - Fixed `test_core.py` (wrong key casing, missing cluster column).
 - Lazy JIT compilation: import-time compilation removed; first call compiles.
 - Ruff lint and format pass clean on all files.
@@ -79,10 +87,23 @@ optimization possible.
 
 ## Installation
 
+### Latest version from GitHub
+
 ```bash
-# Latest development version from GitHub
 pip install git+https://github.com/NiRuff/decontx-python.git
 ```
+
+This installs the current `main` branch directly. Use this if you need the newest changes (for example, the performance improvements or `compute_log_likelihood` described below).
+
+### Editable local install (for development)
+
+```bash
+git clone https://github.com/NiRuff/decontx-python.git
+cd decontx-python
+pip install -e .
+```
+
+An editable install makes Python import the local source. If the package was previously installed in the active environment from a different path, uninstall it first with `pip uninstall decontx-python` so `import decontx` resolves to the local copy.
 
 ## Quick Start
 
@@ -111,6 +132,63 @@ clean_counts = adata.layers["decontX_counts"]
 print(f"Mean contamination: {contamination.mean():.1%}")
 print(f"Highly contaminated cells (>50%): {(contamination > 0.5).sum()}")
 ```
+
+## Usage and performance tips
+
+### Basic run
+
+```python
+import decontx
+
+decontx.decontx(adata, cluster_key="leiden")
+```
+
+The function modifies `adata` in place unless `copy=True`.
+
+### Multi-batch processing
+
+If your dataset has multiple batches, pass the batch column so each batch is processed separately:
+
+```python
+decontx.decontx(adata, cluster_key="leiden", batch_key="batch")
+```
+
+### Speed mode: skip log-likelihood history
+
+When you only need the decontaminated counts and contamination estimates, you can skip the log-likelihood computation that runs every 10 iterations. This is typically **25–40 % faster** and does not change the contamination, theta, phi, eta, or decontaminated counts.
+
+```python
+decontx.decontx(adata, cluster_key="leiden", compute_log_likelihood=False)
+```
+
+The default is `True` to preserve existing behavior.
+
+### Pre-warm the JIT compiler
+
+Numba compiles the sparse kernels on the first call. To avoid paying that cost during the first real run, call `precompile()` once after importing:
+
+```python
+from decontx.fast_ops import precompile
+
+precompile()
+
+decontx.decontx(adata, cluster_key="leiden")
+```
+
+### Run tests and benchmarks (from the repo root)
+
+```bash
+# Tests
+python -m pytest tests/test_core.py tests/test_regression.py -v
+
+# Standalone benchmark
+PYTHONPATH=. python tests/benchmark.py
+
+# Head-to-head comparison with the jjia1 implementation
+PYTHONPATH=. python tests/benchmark_compare.py
+```
+
+If the package is installed in editable mode, `PYTHONPATH=.` is not needed.
 
 ## Why DecontX?
 
@@ -159,41 +237,41 @@ Based on our benchmarking study:
 decontx.decontx(
     adata,
     cluster_key="leiden",
+    batch_key=None,
     max_iter=500,
     delta=(10.0, 10.0),
     estimate_delta=True,
     convergence=0.001,
+    seed=12345,
     copy=False,
+    verbose=True,
+    compute_log_likelihood=True,
 )
 ```
 
 **Parameters:**
 - `adata`: AnnData object with raw counts in `.X`
 - `cluster_key`: Column in `.obs` containing cluster labels
+- `batch_key`: Optional column in `.obs` containing batch labels; batches are processed separately (default: `None`)
 - `max_iter`: Maximum EM iterations (default: 500)
-- `delta`: Beta prior parameters for contamination (default: (10,10))
-- `estimate_delta`: Whether to estimate delta parameters (default: True)
+- `delta`: Beta prior parameters for contamination (default: `(10, 10)`)
+- `estimate_delta`: Whether to estimate delta parameters (default: `True`)
 - `convergence`: Convergence threshold (default: 0.001)
-- `copy`: Return copy or modify in place (default: False)
+- `seed`: Random seed for theta initialization (default: `12345`)
+- `copy`: Return copy or modify in place (default: `False`)
+- `verbose`: Print progress to stdout (default: `True`)
+- `compute_log_likelihood`: Append log-likelihood to `uns['decontX']['log_likelihood_history']` every 10 iterations; set to `False` for faster runs when the history is not needed (default: `True`)
 
 **Returns:**
-Results stored in `adata`:
+`None` if `copy=False` (default), otherwise a copy of `adata`. Results stored in `adata`:
 - `adata.obs['decontX_contamination']`: Per-cell contamination estimates
 - `adata.layers['decontX_counts']`: Decontaminated count matrix
 - `adata.uns['decontX']`: Model parameters and metadata
-
-### Utility Functions
-
-```python
-# Get decontaminated counts as array
-clean_counts = decontx.get_decontx_counts(adata)
-
-# Get contamination estimates
-contamination = decontx.get_decontx_contamination(adata)
-
-# Simple simulation for testing
-sim_data = decontx.simulate_contamination(n_cells=1000, n_genes=2000)
-```
+  - `'contamination'`: same as `adata.obs['decontX_contamination']`
+  - `'delta'`: fitted beta prior (or input prior if `estimate_delta=False`)
+  - `'log_likelihood_history'`: list of log-likelihood values every 10 iterations
+    (only if `compute_log_likelihood=True`)
+  - `'n_iter'`: number of EM iterations actually run
 
 ## Integration with Existing Workflows
 

@@ -28,6 +28,8 @@ def _precompile_functions():
     decontx_initialize_exact_sparse(
         dummy_indptr, dummy_indices, dummy_data, 10, 20, dummy_theta, dummy_z, 1e-20
     )
+    dummy_native_sums = np.zeros(10, dtype=np.float64)
+    dummy_global_acc = np.zeros(20, dtype=np.float64)
     decontx_em_exact_sparse(
         dummy_data,
         dummy_indices,
@@ -44,6 +46,8 @@ def _precompile_functions():
         dummy_delta,
         dummy_nc,
         dummy_phi_acc,
+        dummy_native_sums,
+        dummy_global_acc,
         1e-20,
     )
     calculate_native_matrix_fast_sparse(
@@ -62,7 +66,6 @@ def _precompile_functions():
         dummy_indices,
         dummy_indptr,
         10,
-        20,
         dummy_theta,
         dummy_eta,
         dummy_phi,
@@ -88,13 +91,11 @@ def decontx_em_exact_sparse(
     delta,
     nc_data,
     phi_acc,
+    native_sums,
+    global_acc,
     pseudocount=1e-20,
 ):
-    """Run one EM step. Fill nc_data and update theta, phi, eta in place.
-
-    nc_data holds native count estimates at CSR nonzero positions.
-    phi_acc holds per-cluster gene sums. Both buffers are reused across iterations.
-    """
+    """Run one EM step. Fill nc_data and update theta, phi, eta in place."""
     n_clusters = phi.shape[0]
 
     # E-step: compute native counts at each CSR nonzero position.
@@ -113,8 +114,8 @@ def decontx_em_exact_sparse(
             nc_data[idx] = count * (p_native + pseudocount) / total
 
     # M-step: compute native row sums for theta update. Serial for determinism.
-    native_sums = np.zeros(n_cells, dtype=np.float64)
     for j in range(n_cells):
+        native_sums[j] = 0.0
         s = 0.0
         for idx in range(counts_indptr[j], counts_indptr[j + 1]):
             s += nc_data[idx]
@@ -133,15 +134,16 @@ def decontx_em_exact_sparse(
             var_prop += d * d
         var_prop /= n_cells
 
-        if var_prop > 0.0 and var_prop < mean_prop * (1.0 - mean_prop):
+        if var_prop > pseudocount and var_prop < mean_prop * (1.0 - mean_prop):
             precision = mean_prop * (1.0 - mean_prop) / var_prop - 1.0
             delta[0] = max(0.1, min(1000.0, mean_prop * precision))
             delta[1] = max(0.1, min(1000.0, (1.0 - mean_prop) * precision))
 
     for j in range(n_cells):
-        t = (native_sums[j] + delta[0] - 1.0) / (
-            counts_colsums[j] + delta[0] + delta[1] - 2.0
-        )
+        denom = counts_colsums[j] + delta[0] + delta[1] - 2.0
+        if abs(denom) < pseudocount:
+            denom = pseudocount
+        t = (native_sums[j] + delta[0] - 1.0) / denom
         theta[j] = max(pseudocount, min(1.0 - pseudocount, t))
 
     # Scatter-add nc_data into phi_acc. Serial to prevent race conditions.
@@ -160,7 +162,8 @@ def decontx_em_exact_sparse(
             phi[k, g] = (phi_acc[k, g] + pseudocount) / total
 
     if estimate_eta:
-        global_acc = np.zeros(n_genes, dtype=np.float64)
+        for g in range(n_genes):
+            global_acc[g] = 0.0
         for k in range(n_clusters):
             for g in range(n_genes):
                 global_acc[g] += phi_acc[k, g]
@@ -274,7 +277,6 @@ def decontx_log_likelihood_exact_sparse(
     counts_indices,
     counts_indptr,
     n_cells,
-    n_genes,
     theta,
     eta,
     phi,
