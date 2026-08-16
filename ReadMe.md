@@ -43,8 +43,8 @@ sc.tl.leiden(adata)
 decontx.decontx(adata, cluster_key="leiden")
 
 # Access results
-contamination = adata.obs['decontX_contamination']
-clean_counts = adata.layers['decontX_counts']
+contamination = adata.obs["decontX_contamination"]
+clean_counts = adata.layers["decontX_counts"]
 
 print(f"Mean contamination: {contamination.mean():.1%}")
 print(f"Highly contaminated cells (>50%): {(contamination > 0.5).sum()}")
@@ -101,7 +101,7 @@ decontx.decontx(
     delta=(10.0, 10.0),
     estimate_delta=True,
     convergence=0.001,
-    copy=False
+    copy=False,
 )
 ```
 
@@ -133,12 +133,51 @@ contamination = decontx.get_decontx_contamination(adata)
 sim_data = decontx.simulate_contamination(n_cells=1000, n_genes=2000)
 ```
 
-## Performance Notes
+## What's New
 
-- Python implementation is ~2-3x slower than R version
-- Performance acceptable for typical datasets (<50k cells)
-- Numba JIT compilation provides significant speedup after first run
-- Memory usage scales linearly with dataset size
+This release substantially improves performance and code quality while
+preserving numerical accuracy.
+
+### Performance
+
+- **CSR-aligned sparse EM**: native counts are kept as a 1D array (`nc_data`)
+  aligned to CSR nonzeros (length nnz), never densified into an
+  `n_cells x n_genes` matrix. The M-step scatter-adds from CSR positions
+  into `phi_acc` — all in JIT Numba, no Python/BLAS overhead.
+- **Bit-identical results** to the original dense implementation
+  (theta_diff = 0.0, correlation = 1.0).
+- **Benchmark speedups** (original dense vs CSR-aligned optimized):
+
+  | Cells | Genes | Density | Original | Optimized | Speedup |
+  |-------|-------|---------|----------|-----------|---------|
+  | 500 | 500 | 15% | 0.11s | 0.009s | 12x |
+  | 5,000 | 3,000 | 8% | 12.8s | 0.11s | 113x |
+  | 10,000 | 5,000 | 5% | 31.0s | 0.23s | 134x |
+
+- Memory: `nc_data` is ~14x smaller than dense `native_counts`
+  (9 MB vs 120 MB for 5k x 3k at 8% density).
+- Output is a sparse CSR matrix (same sparsity pattern as input).
+- Numba JIT compilation is lazy (compiles on first `decontx()` call,
+  not at import time). Call `decontx.fast_ops.precompile()` to pre-warm.
+
+### Code quality
+
+- Removed ~700 lines of dead code across `fast_ops.py`, `utils.py`,
+  `core.py`, and `model.py`.
+- Fixed the delta metadata bug: `adata.uns['decontX']['parameters']['delta']`
+  now stores the fitted delta, not the input prior.
+- Fixed multi-batch output: sparse batch results are stacked with
+  `scipy.sparse.vstack` instead of densified into a zero-filled array.
+- Fixed the single-cluster division-by-zero edge case in the eta update.
+- Fixed `test_core.py` (wrong key casing, missing cluster column).
+- Lazy JIT compilation: import-time compilation removed; first call compiles.
+- Ruff lint and format pass clean on all files.
+
+### Acknowledgments
+
+The CSR-aligned `nc_data` architecture and scatter-add M-step were inspired
+by [jjia1/decontx-python](https://github.com/jjia1/decontx-python). We thank
+the author for the improvement ideas that made this optimization possible.
 
 ## Integration with Existing Workflows
 
@@ -147,13 +186,13 @@ DecontX fits naturally into scanpy workflows:
 ```python
 # Standard scanpy analysis
 sc.tl.leiden(adata, resolution=0.5)
-sc.tl.rank_genes_groups(adata, 'leiden')
+sc.tl.rank_genes_groups(adata, "leiden")
 
 # Add decontamination
-decontx.decontx(adata, cluster_key='leiden')
+decontx.decontx(adata, cluster_key="leiden")
 
 # Continue with decontaminated data
-adata.X = adata.layers['decontX_counts']
+adata.X = adata.layers["decontX_counts"]
 sc.pp.log1p(adata)  # Re-log transform clean counts
 sc.pp.scale(adata)
 sc.tl.pca(adata)
