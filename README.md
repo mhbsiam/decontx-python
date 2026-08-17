@@ -84,7 +84,6 @@ The figure above predates the R-parity corrections described above. We have not 
 - [API reference](API.md)
 - [Workflow guide](WORKFLOW.md)
 - [Performance tips](PERFORMANCE.md)
-- [Validation and R parity](VALIDATION.md)
 - [Method comparison](METHODS.md)
 - [Changelog](CHANGELOG.md)
 - [Contributing and development](CONTRIBUTING.md)
