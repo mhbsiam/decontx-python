@@ -98,6 +98,7 @@ packages = ["decontx"]
 exclude = [
     "/.github",
     "/docs",
+    "/images",
     "/tests",
     "/.gitignore",
     "/.pre-commit-config.yaml",
