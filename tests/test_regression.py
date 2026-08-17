@@ -5,6 +5,7 @@ on a fixed synthetic dataset. All tests compare against it.
 """
 
 import os
+import warnings
 
 import anndata as ad
 import numpy as np
@@ -437,7 +438,14 @@ def test_uns_metadata_is_merged_not_clobbered():
     """_store_metadata runs last; a wholesale assignment would drop cluster_map."""
     result = _run_current()
     uns = result.uns["decontX"]
-    for key in ("parameters", "fitted", "cluster_map", "runtime", "version"):
+    for key in (
+        "parameters",
+        "fitted",
+        "convergence",
+        "cluster_map",
+        "runtime",
+        "version",
+    ):
         assert key in uns, f"uns['decontX'] missing {key}"
     assert uns["parameters"]["delta"] == [10.0, 10.0], (
         "parameters.delta should hold the caller's input, not the fitted value"
@@ -479,3 +487,132 @@ def test_restored_raw_counts_are_accepted_after_clustering():
     adata.X = adata.layers["counts"].copy()
     result = decontx.decontx(adata, cluster_key="leiden", copy=True, verbose=False)
     assert "decontX_counts" in result.layers
+
+
+def test_model_reports_converged_flag_not_just_n_iter():
+    """n_iter alone cannot distinguish convergence from exhausting max_iter.
+
+    A run can converge on its final allowed iteration, so n_iter == max_iter is
+    ambiguous. The model must report the reason it stopped.
+    """
+    from decontx.model import DecontXModel
+
+    adata, z = make_dataset()
+    z_int = np.ascontiguousarray(z, dtype=np.int32)
+
+    converged = DecontXModel(
+        max_iter=500, convergence=0.001, seed=12345, verbose=False
+    ).fit_transform(adata.X, z_int)
+    assert converged["converged"] is True
+    assert converged["n_iter"] < 500
+    assert converged["final_theta_change"] < 0.001
+
+    capped = DecontXModel(
+        max_iter=2, convergence=0.001, seed=12345, verbose=False
+    ).fit_transform(adata.X, z_int)
+    assert capped["converged"] is False
+    assert capped["n_iter"] == 2
+    assert capped["final_theta_change"] >= 0.001
+
+
+def test_non_convergence_warns_even_when_not_verbose():
+    """The regression this guards: non-convergence used to be undetectable.
+
+    n_iter never reached uns, and _process_batches passes verbose=False to the
+    model, suppressing its "Converged at ..." print. A batch that exhausted
+    max_iter therefore produced subtly wrong output with no indication at all.
+    """
+    n_cells = 200
+    half = np.array(["A"] * (n_cells // 2) + ["B"] * (n_cells // 2))
+    adata, _ = _batched_fixture(half, n_cells=n_cells)
+
+    with pytest.warns(UserWarning, match="did not converge"):
+        result = decontx.decontx(
+            adata,
+            cluster_key="leiden",
+            batch_key="batch",
+            copy=True,
+            verbose=False,
+            max_iter=2,
+        )
+
+    conv = result.uns["decontX"]["convergence"]
+    assert conv["all_converged"] is False
+    assert conv["n_batches_not_converged"] == 2
+    assert conv["per_batch"]["n_iter"] == [2, 2]
+    assert conv["per_batch"]["converged"] == [False, False]
+
+
+def test_converged_run_does_not_warn():
+    """The warning must not cry wolf on a healthy run."""
+    n_cells = 200
+    half = np.array(["A"] * (n_cells // 2) + ["B"] * (n_cells // 2))
+    adata, _ = _batched_fixture(half, n_cells=n_cells)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        result = decontx.decontx(
+            adata,
+            cluster_key="leiden",
+            batch_key="batch",
+            copy=True,
+            verbose=False,
+            max_iter=500,
+        )
+
+    assert result.uns["decontX"]["convergence"]["all_converged"] is True
+
+
+def test_convergence_reported_for_every_batch():
+    """One entry per batch, in batch order, so a stalled batch is identifiable."""
+    n_cells = 300
+    names = np.array(["b0", "b1", "b2"]).repeat(n_cells // 3)
+    adata, _ = _batched_fixture(names, n_cells=n_cells)
+
+    result = decontx.decontx(
+        adata, cluster_key="leiden", batch_key="batch", copy=True, verbose=False
+    )
+    per_batch = result.uns["decontX"]["convergence"]["per_batch"]
+
+    assert per_batch["batch"] == ["b0", "b1", "b2"]
+    assert result.uns["decontX"]["convergence"]["n_batches"] == 3
+    for key in ("n_iter", "converged", "final_theta_change"):
+        assert len(per_batch[key]) == 3, f"{key} has wrong length"
+    assert all(n >= 1 for n in per_batch["n_iter"])
+
+
+def test_convergence_block_survives_h5ad_round_trip():
+    """Stored as parallel lists so h5py can write it; verify that holds.
+
+    A dict keyed by batch name would break on any name containing "/", which
+    h5py would split into nested groups.
+    """
+    import tempfile
+
+    n_cells = 200
+    slashed = np.array(["p/1"] * (n_cells // 2) + ["p/2"] * (n_cells // 2))
+    adata, _ = _batched_fixture(slashed, n_cells=n_cells)
+
+    result = decontx.decontx(
+        adata, cluster_key="leiden", batch_key="batch", copy=True, verbose=False
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "conv.h5ad")
+        result.write_h5ad(path)
+        back = ad.read_h5ad(path)
+
+    conv = back.uns["decontX"]["convergence"]
+    assert bool(conv["all_converged"]) is True
+    assert list(conv["per_batch"]["batch"]) == ["p/1", "p/2"]
+    assert len(conv["per_batch"]["n_iter"]) == 2
+
+
+def test_single_batch_run_also_reports_convergence():
+    """The no-batch_key path must populate the same block."""
+    result = _run_current()
+    conv = result.uns["decontX"]["convergence"]
+    assert conv["n_batches"] == 1
+    assert conv["all_converged"] is True
+    assert len(conv["per_batch"]["n_iter"]) == 1
+    assert conv["per_batch"]["n_iter"][0] < conv["max_iter"]

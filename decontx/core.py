@@ -125,6 +125,33 @@ def decontx(
     if not isinstance(fitted_delta, np.ndarray):
         fitted_delta = np.asarray(fitted_delta)
 
+    # Non-convergence used to be undetectable from the output: n_iter was
+    # dropped before it reached uns, and _process_batches suppresses the
+    # model's own "Converged at ..." print. Warn rather than raise -- the
+    # result is usable but not trustworthy, and raising would discard a run
+    # that may have taken hours. warnings.warn also fires under verbose=False,
+    # which is precisely the case that used to be silent.
+    convergence_info = _summarize_convergence(results, max_iter)
+    if not convergence_info["all_converged"]:
+        stalled = [
+            f"{name} (Δtheta={chg:.3g})"
+            for name, conv, chg in zip(
+                convergence_info["per_batch"]["batch"],
+                convergence_info["per_batch"]["converged"],
+                convergence_info["per_batch"]["final_theta_change"],
+            )
+            if not conv
+        ]
+        warnings.warn(
+            f"DecontX did not converge for {len(stalled)} of "
+            f"{len(convergence_info['per_batch']['batch'])} batch(es) within "
+            f"max_iter={max_iter}: {', '.join(stalled)}. "
+            f"Contamination estimates for those cells are unreliable; rerun with "
+            f"a larger max_iter or a looser convergence threshold "
+            f"(current: {convergence}).",
+            stacklevel=2,
+        )
+
     _store_metadata(
         adata,
         delta,
@@ -135,10 +162,17 @@ def decontx(
         seed,
         start_time,
         label_map,
+        convergence_info,
     )
 
     if verbose:
         contamination = adata.obs["decontX_contamination"]
+        iters = convergence_info["per_batch"]["n_iter"]
+        print(
+            f"EM iterations: min={min(iters)}, max={max(iters)} "
+            f"(max_iter={max_iter}); all converged: "
+            f"{convergence_info['all_converged']}"
+        )
         print(f"Mean contamination: {contamination.mean():.1%}")
         print(f"Highly contaminated cells (>50%): {(contamination > 0.5).sum()}")
 
@@ -220,6 +254,34 @@ def _process_cluster_labels(z: np.ndarray) -> Tuple[np.ndarray, dict]:
     return np.array([label_map[x] for x in z]).astype(int), label_map
 
 
+def _summarize_convergence(results: dict, max_iter: int) -> dict:
+    """Collect per-batch EM convergence into an h5ad-writable summary.
+
+    Stored as parallel lists rather than a dict keyed by batch name: batch
+    names are arbitrary strings, and one containing "/" would be split into
+    nested groups by h5py on write.
+    """
+    names, iters, flags, changes = [], [], [], []
+    for name, res in results.items():
+        names.append(str(name))
+        iters.append(int(res["n_iter"]))
+        flags.append(bool(res["converged"]))
+        changes.append(float(res["final_theta_change"]))
+
+    return {
+        "all_converged": bool(all(flags)),
+        "n_batches": len(names),
+        "n_batches_not_converged": int(sum(not f for f in flags)),
+        "max_iter": int(max_iter),
+        "per_batch": {
+            "batch": names,
+            "n_iter": iters,
+            "converged": flags,
+            "final_theta_change": changes,
+        },
+    }
+
+
 def _process_batches(
     adata: AnnData,
     z_labels: np.ndarray,
@@ -280,7 +342,13 @@ def _process_batches(
 
         if verbose:
             contamination = result["contamination"]
-            print(f"    Mean contamination: {contamination.mean():.1%}")
+            status = (
+                f"converged in {result['n_iter']} iter"
+                if result["converged"]
+                else f"DID NOT CONVERGE ({result['n_iter']} iter, "
+                f"Δtheta={result['final_theta_change']:.3g})"
+            )
+            print(f"    Mean contamination: {contamination.mean():.1%} [{status}]")
 
     return batch_results
 
@@ -381,6 +449,7 @@ def _store_metadata(
     seed: int,
     start_time: datetime,
     label_map: dict,
+    convergence_info: dict,
 ):
     """Store run parameters and metadata.
 
@@ -404,6 +473,7 @@ def _store_metadata(
             "fitted": {
                 "delta": list(np.asarray(fitted_delta)),
             },
+            "convergence": convergence_info,
             "cluster_map": {str(k): int(v) for k, v in label_map.items()},
             "runtime": {
                 "start_time": start_time.isoformat(),

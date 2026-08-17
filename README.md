@@ -462,9 +462,36 @@ decontx.decontx(
     `convergence`, `seed`)
   - `'fitted'`: `{'delta': ...}`, the fitted beta prior (equal to the input when
     `estimate_delta=False`; the mean across batches when `batch_key` is used)
+  - `'convergence'`: whether the EM actually converged — see below
   - `'cluster_map'`: your cluster labels mapped to the internal `1..K` codes
   - `'runtime'`: start/end timestamps and duration
   - `'version'`: package version
+
+### Checking convergence
+
+`uns['decontX']['convergence']` records why the EM stopped, per batch:
+
+```python
+conv = adata.uns["decontX"]["convergence"]
+conv["all_converged"]            # False if any batch hit max_iter
+conv["n_batches_not_converged"]
+conv["per_batch"]                # parallel lists: batch, n_iter,
+                                 # converged, final_theta_change
+```
+
+If any batch fails to converge, DecontX emits a `UserWarning` naming it. That
+warning fires even under `verbose=False`, so non-convergence cannot pass
+unnoticed. Estimates for cells in a non-converged batch are unreliable — raise
+`max_iter` (or loosen `convergence`) and rerun.
+
+Iteration counts are workload-dependent: heterogeneous real data routinely needs
+several hundred iterations, so do not treat the default `max_iter=500` as
+generous. Check `conv["per_batch"]["n_iter"]` against it rather than assuming.
+
+```python
+import pandas as pd
+pd.DataFrame(conv["per_batch"]).sort_values("n_iter", ascending=False).head()
+```
 
 ## After DecontX
 

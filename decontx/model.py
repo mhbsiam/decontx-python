@@ -101,6 +101,11 @@ class DecontXModel:
 
         log_likelihood_history = []
         n_iter = 0
+        # Tracked explicitly: n_iter == max_iter is ambiguous on its own, since
+        # a run can converge exactly on its final allowed iteration. Callers
+        # need to tell "stopped because it converged" from "ran out of budget".
+        converged = False
+        theta_change = np.inf
         estimate_eta = X_background is None
         pseudocount = 1e-20
 
@@ -175,8 +180,9 @@ class DecontXModel:
                         )
 
             if theta_change < self.convergence_threshold:
+                converged = True
                 if self.verbose:
-                    print(f"Converged at iteration {iteration}")
+                    print(f"Converged at iteration {n_iter}")
                 break
 
         nc_data_final = calculate_native_matrix_fast_sparse(
@@ -243,4 +249,6 @@ class DecontXModel:
             "z": z,
             "log_likelihood_history": log_likelihood_history,
             "n_iter": n_iter,
+            "converged": converged,
+            "final_theta_change": float(theta_change),
         }
