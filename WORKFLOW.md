@@ -1,9 +1,12 @@
 # Workflow
 
-## Where DecontX goes in your workflow
+## Where DecontX fits in your workflow
 
-DecontX is a **count model**. It needs two things: **raw integer counts** in `adata.X`,
-and **cluster labels** in `adata.obs`. That combination determines where it slots in:
+DecontX is a count model. It needs two things:
+- raw integer counts in `adata.X`
+- cluster labels in `adata.obs`
+
+The diagram below shows where DecontX fits:
 
 ```
 load  →  QC filter  →  cluster (on normalized data)  →  DecontX (on raw counts)  →  normalize → analyze
@@ -11,13 +14,11 @@ load  →  QC filter  →  cluster (on normalized data)  →  DecontX (on raw co
                                         raw counts in .X, labels in .obs
 ```
 
-The subtlety is that clustering needs normalized data while DecontX needs raw counts, so
-the normalization must not clobber `.X` before DecontX runs. Two ways to handle that.
+You must cluster on normalized data. DecontX needs raw counts. So normalization must not overwrite `.X` before DecontX runs. Use one of the two methods below.
 
-### Recommended: cluster on a copy
+## Option 1: cluster on a copy
 
-`adata.X` never stops being raw counts, so there is nothing to restore and nothing to
-get wrong.
+`adata.X` always stays as raw counts. You do not need to restore anything. You cannot get the order wrong.
 
 ```python
 import scanpy as sc
@@ -40,7 +41,7 @@ sc.tl.leiden(clust)
 adata.obs["leiden"] = clust.obs["leiden"]
 del clust
 
-# 3. DecontX, on raw counts
+# 3. Run DecontX on raw counts
 decontx.decontx(adata, cluster_key="leiden")
 
 contamination = adata.obs["decontX_contamination"]
@@ -54,10 +55,9 @@ sc.pp.normalize_total(adata)
 sc.pp.log1p(adata)
 ```
 
-### Memory-conscious alternative: stash counts in a layer
+## Option 2: stash counts in a layer
 
-Avoids the full copy. Preprocess in place, then put the raw counts back before running
-DecontX.
+This option avoids the full copy. Preprocess in place. Then put the raw counts back before you run DecontX.
 
 ```python
 adata = sc.read_h5ad("pbmc.h5ad")
@@ -77,36 +77,27 @@ adata.X = adata.layers["counts"].copy()    # restore raw counts
 decontx.decontx(adata, cluster_key="leiden")
 ```
 
-### If you already have cluster labels
+## Use existing cluster labels
 
-Skip straight to it — any `obs` column works, including `cell_type` annotations:
+If you already have cluster labels, skip straight to DecontX. Any `obs` column works, including `cell_type` annotations:
 
 ```python
 decontx.decontx(adata, cluster_key="cell_type")
 ```
 
-### Common mistakes
+## Common errors
 
-DecontX validates its input and will tell you if something is off, but the two easy
-errors are worth stating outright:
+DecontX validates its input. It reports problems with the input. But three easy errors are worth stating outright:
 
-- **Running it after `sc.pp.log1p`.** Raises `ValueError`. DecontX models counts; log
-  values are meaningless to it. Run it earlier, or restore the counts layer first.
-- **Running it after `sc.pp.normalize_total` only.** Emits a warning about non-integer
-  values rather than raising, since normalized-but-not-logged data is harder to detect
-  with certainty. The results are still unreliable — fix the ordering.
-- **Subsetting to highly variable genes first.** DecontX estimates the ambient profile
-  from the full transcriptome. Run it on all genes, then subset.
+- **Running DecontX after `sc.pp.log1p`.** This raises `ValueError`. DecontX models counts. Log values have no meaning to it. Run DecontX earlier, or restore the counts layer first.
+- **Running DecontX after `sc.pp.normalize_total` only.** This emits a warning about non-integer values. DecontX does not raise because normalized-but-not-logged data is harder to detect with certainty. The results are still unreliable. Fix the ordering.
+- **Subsetting to highly variable genes first.** DecontX estimates the ambient profile from the full transcriptome. Run it on all genes, then subset.
 
-Filtering cells and genes *before* DecontX is fine and recommended — empty droplets and
-never-detected genes only add noise to the ambient estimate.
+You can filter cells and genes before DecontX. This is recommended. Empty droplets and never-detected genes only add noise to the ambient estimate.
 
+## After you run DecontX
 
-## After DecontX
-
-See [Where DecontX goes in your workflow](#where-decontx-goes-in-your-workflow) for
-where it slots in. Once it has run, `adata.layers["decontX_counts"]` holds
-decontaminated counts and you re-normalize from those:
+`adata.layers["decontX_counts"]` holds the decontaminated counts. Re-normalize from those counts:
 
 ```python
 adata.layers["raw_counts"] = adata.X.copy()      # keep the originals
@@ -122,15 +113,9 @@ sc.tl.leiden(adata)                               # re-cluster on clean counts
 sc.tl.rank_genes_groups(adata, "leiden")
 ```
 
-Re-clustering after decontamination is optional. The clusters DecontX consumed only
-need to be good enough to estimate each population's expression profile, but marker
-detection and differential expression generally benefit from clusters derived from the
-cleaned counts.
+Re-clustering after decontamination is optional. DecontX only needs clusters that are good enough to estimate each population's expression profile. Marker detection and differential expression usually benefit from clusters derived from the cleaned counts.
 
-Counts are fractional by default, matching the R implementation. Most scanpy functions
-accept that. If a downstream tool requires integers, either run with
-`round_counts=True` or round explicitly — but note that rounding zeroes every native
-count below 0.5, roughly 8 % of nonzero entries on typical data.
+Counts are fractional by default. This matches the R implementation. Most scanpy functions accept fractional counts. If a downstream tool needs integers, either run with `round_counts=True` or round explicitly. Rounding zeroes every native count below 0.5. This removes roughly 8 % of nonzero entries on typical data.
 
 To inspect what was removed:
 

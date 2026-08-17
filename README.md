@@ -3,18 +3,31 @@
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/release/python-380/)
 
-A Python implementation of DecontX for removing ambient RNA contamination from single-cell RNA-seq data, designed for seamless integration with scanpy workflows.
+DecontX removes ambient RNA from single-cell RNA-seq data. This Python package works with scanpy. You do not need R.
 
 ## Overview
 
-DecontX is a Bayesian method to estimate and remove cross-contamination from ambient RNA in droplet-based single-cell RNA-seq data. This Python implementation provides near-perfect parity with the original R version (correlation > 0.999) while enabling pure Python workflows without R dependencies.
+DecontX is a Bayesian method. It estimates and removes cross-contamination from ambient RNA in droplet-based single-cell RNA-seq data. This Python implementation agrees with the original R version. The correlation is > 0.999.
 
 **Key Features:**
-- Pure Python implementation (no R required)
-- Seamless scanpy integration
-- Numba-accelerated performance
-- Bayesian contamination estimation per cell
-- Validated against original R implementation
+- Pure Python. You do not need R.
+- Works with scanpy.
+- Numba accelerates performance.
+- Bayesian contamination estimate for each cell.
+- Validated against the original R implementation.
+
+## What's New
+
+This fork rewrites the original Python port. It focuses on R parity, performance, and reliability.
+
+- **Sparse, CSR-aligned EM.** Native counts stay in a 1D array. This array aligns with the input CSR pattern. The EM loop does not densify data. The new code is faster than the original dense implementation. For 500 × 500 data, the speedup is 12×. For 10,000 × 5,000 data, the speedup is 134×. For 5,000 × 3,000 data at 8% density, the runtime is 0.11 s. The original dense implementation needs 12.8 s.
+- **R parity to ~7e-16.** Contamination, theta, phi, eta, and counts agree with an independent transcription of `DecontX.cpp`. The correlation is > 0.999.
+- **R-correct theta, contamination, and delta.** The code uses the posterior mean for theta. It uses the E-step proportion for contamination. It keeps counts as fractional values. It fits delta with Minka's fixed-point Dirichlet MLE.
+- **Multi-batch fixes.** Cluster labels are safe to remap for each batch. NaN batch labels raise an error. The batch name `"all"` does not collide with the single-batch sentinel. Each batch gets its own seed.
+- **Performance options.** You can use lazy Numba JIT compilation, `compute_log_likelihood=False`, `dtype="float32"`, and `round_counts`.
+- **Cleaner metadata and dead-code removal.** `uns['decontX']` is split into `parameters` and `fitted`. Approximately 700 lines of dead code were removed.
+
+For the full list of changes and acknowledgments, see [CHANGELOG.md](CHANGELOG.md).
 
 ## Installation
 
@@ -24,9 +37,9 @@ DecontX is a Bayesian method to estimate and remove cross-contamination from amb
 pip install git+https://github.com/NiRuff/decontx-python.git
 ```
 
-This installs the current `main` branch directly. Use this if you need the newest changes (for example, the performance improvements or `compute_log_likelihood` described in [PERFORMANCE.md](PERFORMANCE.md)).
+This command installs the current `main` branch. Use it when you need the newest changes. For more information about performance and `compute_log_likelihood`, see [PERFORMANCE.md](PERFORMANCE.md).
 
-For development install instructions and how to run tests, see [CONTRIBUTING.md](CONTRIBUTING.md).
+For development install instructions and test instructions, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Quickstart
 
@@ -36,7 +49,7 @@ import decontx
 decontx.decontx(adata, cluster_key="leiden")
 ```
 
-The function modifies `adata` in place unless `copy=True`. See [API.md](API.md) for the full API and [WORKFLOW.md](WORKFLOW.md) for how to slot it into a scanpy pipeline.
+The function changes `adata` in place. Set `copy=True` to get a copy. For the full API, see [API.md](API.md). For how to use it in a scanpy pipeline, see [WORKFLOW.md](WORKFLOW.md).
 
 ## Documentation
 

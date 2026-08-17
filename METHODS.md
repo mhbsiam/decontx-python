@@ -1,21 +1,20 @@
 # Methods and comparison
 
-## Why DecontX?
+## Why use DecontX?
 
-Ambient RNA contamination occurs when mRNA from lysed/stressed cells gets captured in droplets with other cells, causing:
+Ambient RNA contamination occurs when droplets capture mRNA from lysed or stressed cells along with other cells. This causes:
 - Cross-contamination between cell types
 - Blurred cell type boundaries  
 - False positive marker gene expression
 - Reduced clustering quality
 
-DecontX models each cell as a mixture of:
+DecontX models each cell as a mixture of two parts:
 1. **Native transcripts** from the cell's true type
 2. **Contaminating transcripts** from other cell types in the sample
 
+## Method comparison
 
-## Method Comparison
-
-Based on our benchmarking study:
+We ran a benchmarking study. The table below shows the results.
 
 | Method | Ambient RNA Removed | Precision | Conservativeness |
 |--------|-------------------|-----------|------------------|
@@ -23,7 +22,7 @@ Based on our benchmarking study:
 | **DecontX** | ~90% | Medium-High | Balanced |
 | **CellBender** | ~90% | Medium | More aggressive |
 
-**Recommendation**: 
-- Use **SoupX** for maximum safety and minimal false positives
-- Use **DecontX** for balanced contamination removal in standard workflows  
-- Use **CellBender** when you can replace your entire preprocessing pipeline
+**Recommendation**:
+- Use **SoupX** when you want maximum safety and the fewest false positives.
+- Use **DecontX** for balanced contamination removal in standard workflows.
+- Use **CellBender** when you can replace your entire preprocessing pipeline.
