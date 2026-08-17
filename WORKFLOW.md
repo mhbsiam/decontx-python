@@ -14,9 +14,9 @@ load  →  QC filter  →  cluster (on normalized data)  →  DecontX (on raw co
                                         raw counts in .X, labels in .obs
 ```
 
-You must cluster on normalized data. DecontX needs raw counts. So normalization must not overwrite `.X` before DecontX runs. Use one of the two methods below.
+You must cluster on normalized data. DecontX needs raw counts. So normalization must not overwrite `.X` before DecontX runs. Use the method below.
 
-## Option 1: cluster on a copy
+## Cluster on a copy
 
 `adata.X` always stays as raw counts. You do not need to restore anything. You cannot get the order wrong.
 
@@ -55,28 +55,6 @@ sc.pp.normalize_total(adata)
 sc.pp.log1p(adata)
 ```
 
-## Option 2: stash counts in a layer
-
-This option avoids the full copy. Preprocess in place. Then put the raw counts back before you run DecontX.
-
-```python
-adata = sc.read_h5ad("pbmc.h5ad")
-sc.pp.filter_cells(adata, min_genes=200)
-sc.pp.filter_genes(adata, min_cells=3)
-
-adata.layers["counts"] = adata.X.copy()    # stash BEFORE normalizing
-
-sc.pp.normalize_total(adata)
-sc.pp.log1p(adata)
-sc.pp.highly_variable_genes(adata, n_top_genes=2000)
-sc.pp.pca(adata)
-sc.pp.neighbors(adata)
-sc.tl.leiden(adata)
-
-adata.X = adata.layers["counts"].copy()    # restore raw counts
-decontx.decontx(adata, cluster_key="leiden")
-```
-
 ## Use existing cluster labels
 
 If you already have cluster labels, skip straight to DecontX. Any `obs` column works, including `cell_type` annotations:
@@ -89,7 +67,7 @@ decontx.decontx(adata, cluster_key="cell_type")
 
 DecontX validates its input. It reports problems with the input. But three easy errors are worth stating outright:
 
-- **Running DecontX after `sc.pp.log1p`.** This raises `ValueError`. DecontX models counts. Log values have no meaning to it. Run DecontX earlier, or restore the counts layer first.
+- **Running DecontX after `sc.pp.log1p`.** This raises `ValueError`. DecontX models counts. Log values have no meaning to it. Run DecontX earlier, or restore raw counts first.
 - **Running DecontX after `sc.pp.normalize_total` only.** This emits a warning about non-integer values. DecontX does not raise because normalized-but-not-logged data is harder to detect with certainty. The results are still unreliable. Fix the ordering.
 - **Subsetting to highly variable genes first.** DecontX estimates the ambient profile from the full transcriptome. Run it on all genes, then subset.
 
