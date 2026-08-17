@@ -1,8 +1,4 @@
 # DecontX Python Port
-[![PyPI version](https://badge.fury.io/py/decontx-python.svg)](https://badge.fury.io/py/decontx-python)
-[![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/release/python-380/)
-
 <img src="images/DecontX.png" alt="DecontX Python banner" width="100%">
 
 DecontX removes ambient RNA from single-cell RNA-seq data. This Python port directly works with scanpy.
