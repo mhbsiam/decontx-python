@@ -211,10 +211,25 @@ class DecontXModel:
         # Always from the unrounded native counts, and in float64 even when the
         # EM ran at float32 -- rounding is an output-format choice and must not
         # change the contamination estimate.
-        native_totals = np.add.reduceat(
-            nc_data_final.astype(np.float64), counts_indptr[:-1]
-        )
-        native_totals[np.diff(counts_indptr) == 0] = 0.0
+        # Blocked so this never materializes a float64 copy of the whole nnz
+        # array (2.1 GB on a 260M-nonzero matrix). bincount accumulates in
+        # float64 and handles empty rows without special-casing.
+        native_totals = np.zeros(n_cells, dtype=np.float64)
+        block = 8192
+        for start in range(0, n_cells, block):
+            stop = min(start + block, n_cells)
+            lo = int(counts_indptr[start])
+            hi = int(counts_indptr[stop])
+            if hi <= lo:
+                continue
+            seg = np.asarray(nc_data_final[lo:hi], dtype=np.float64)
+            rows = np.repeat(
+                np.arange(stop - start), np.diff(counts_indptr[start : stop + 1])
+            )
+            native_totals[start:stop] = np.bincount(
+                rows, weights=seg, minlength=stop - start
+            )
+
         colsums64 = counts_colsums.astype(np.float64)
         contamination = (colsums64 - native_totals) / np.maximum(colsums64, 1.0)
 
