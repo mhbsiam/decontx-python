@@ -9,6 +9,8 @@ import os
 import anndata as ad
 import numpy as np
 import pandas as pd
+import pytest
+from scipy.sparse import csr_matrix
 
 import decontx
 from tests.generate_golden import make_dataset
@@ -96,7 +98,13 @@ def test_regression_phi_eta_bit_identical():
 
 
 def test_regression_decontX_counts_bit_identical():
-    """Decontaminated counts must match the golden reference exactly."""
+    """Decontaminated counts must match the golden reference to 1e-8.
+
+    Counts are float64 now that rounding is gone, and the kernels are compiled
+    with fastmath, so exact equality is not reproducible across recompiles or
+    CPUs -- observed drift is ~1e-14. The tolerance matches the other
+    regression tests.
+    """
     golden = _load_golden()
     result = _run_current()
     counts = result.layers["decontX_counts"]
@@ -105,8 +113,10 @@ def test_regression_decontX_counts_bit_identical():
     if _issparse(counts):
         counts = counts.toarray()
     counts = np.asarray(counts)
-    assert np.array_equal(counts, golden["decontX_counts"]), (
-        "decontX_counts differ from golden."
+    max_abs_diff = np.max(np.abs(counts - golden["decontX_counts"]))
+    assert max_abs_diff < 1e-8, (
+        f"decontX_counts differ from golden by max {max_abs_diff:.2e} "
+        f"(expected < 1e-8)."
     )
 
 
@@ -117,3 +127,355 @@ def test_regression_correlation_gate():
     contam = result.obs["decontX_contamination"].values
     corr = np.corrcoef(contam, golden["contamination"])[0, 1]
     assert corr > 0.999, f"Correlation with golden = {corr:.6f} (expected > 0.999)."
+
+
+def test_r_parity_gate():
+    """Contamination must track an independent transcription of celda's C++.
+
+    The golden fixtures come from this package, so the gate above can only
+    detect drift. This one is the actual accuracy check: tests/r_reference.py
+    shares no code with decontx/ and is transcribed from DecontX.cpp.
+    """
+    from tests.r_reference import run_reference
+
+    adata, z = make_dataset()
+    ref = run_reference(adata.X, z, max_iter=200, convergence=0.001, seed=12345)
+    result = _run_current()
+    contam = result.obs["decontX_contamination"].values
+
+    corr = np.corrcoef(contam, ref["contamination"])[0, 1]
+    assert corr > 0.999, (
+        f"Correlation with R reference = {corr:.6f} (expected > 0.999)."
+    )
+
+    ref_mean = ref["contamination"].mean()
+    assert abs(contam.mean() - ref_mean) < 0.01, (
+        f"Mean contamination {contam.mean():.4f} vs R reference {ref_mean:.4f}."
+    )
+
+
+def test_r_parity_is_exact_modulo_final_estep():
+    """The only difference from R is a documented one-E-step offset.
+
+    R reports contamination from the E-step at the start of its final
+    iteration; decontx runs one more with the converged parameters so that
+    contamination stays consistent with the counts it returns. Align that one
+    step and the two implementations agree to machine precision -- a far
+    stronger gate than a correlation threshold.
+    """
+    from tests.r_reference import run_reference
+
+    adata, z = make_dataset()
+    ref = run_reference(adata.X, z, max_iter=200, convergence=0.001, seed=12345)
+    contam = _run_current().obs["decontX_contamination"].values
+
+    max_diff = np.max(np.abs(contam - ref["contamination_final"]))
+    assert max_diff < 1e-10, (
+        f"Differs from R reference by {max_diff:.2e} after aligning the final "
+        "E-step (expected < 1e-10)."
+    )
+
+
+def test_delta_matches_r_dirichlet_mle():
+    """Delta is fitted by Minka's fixed point, as MCMCprecision::fit_dirichlet is."""
+    from tests.r_reference import run_reference
+
+    adata, z = make_dataset()
+    ref = run_reference(adata.X, z, max_iter=200, convergence=0.001, seed=12345)
+    fitted = np.asarray(_run_current().uns["decontX"]["fitted"]["delta"])
+
+    assert np.allclose(fitted, ref["delta"], rtol=1e-6), (
+        f"fitted delta {fitted} vs R reference {ref['delta']}"
+    )
+
+
+def test_float32_matches_float64_within_tolerance():
+    """Opt-in float32 halves the largest arrays; verify what it costs."""
+    from tests.r_reference import run_reference
+
+    adata, z = make_dataset()
+    ref = run_reference(adata.X, z, max_iter=200, convergence=0.001, seed=12345)
+
+    out = {}
+    for dt in ("float64", "float32"):
+        result = decontx.decontx(
+            make_dataset()[0],
+            cluster_key="leiden",
+            copy=True,
+            verbose=False,
+            seed=12345,
+            max_iter=200,
+            dtype=dt,
+        )
+        out[dt] = result.obs["decontX_contamination"].values
+        assert result.layers["decontX_counts"].dtype == np.dtype(dt)
+
+    f32_err = np.max(np.abs(out["float32"] - ref["contamination_final"]))
+    assert f32_err < 1e-5, f"float32 differs from R reference by {f32_err:.2e}"
+    assert np.max(np.abs(out["float32"] - out["float64"])) < 1e-5
+
+
+def test_round_counts_restores_integer_output():
+    """Callers can opt back into int32 output for RAM/disk."""
+    result = decontx.decontx(
+        make_dataset()[0],
+        cluster_key="leiden",
+        copy=True,
+        verbose=False,
+        seed=12345,
+        max_iter=200,
+        round_counts=True,
+    )
+    counts = result.layers["decontX_counts"]
+    assert counts.dtype == np.int32
+
+    # Rounding is an output format, and must not perturb the estimate.
+    golden = _load_golden()
+    contam = result.obs["decontX_contamination"].values
+    assert np.max(np.abs(contam - golden["contamination"])) < 1e-8
+
+
+def test_digamma_helpers_match_scipy():
+    """The Numba digamma/trigamma series must track scipy across the used range."""
+    from scipy.special import digamma, polygamma
+
+    from decontx.fast_ops import _digamma, _trigamma
+
+    xs = np.concatenate([np.logspace(-3, 3, 200), np.linspace(0.01, 20, 200)])
+    dg = np.array([_digamma(x) for x in xs])
+    tg = np.array([_trigamma(x) for x in xs])
+
+    assert np.max(np.abs(dg - digamma(xs)) / np.abs(digamma(xs))) < 1e-7
+    assert np.max(np.abs(tg - polygamma(1, xs)) / np.abs(polygamma(1, xs))) < 1e-7
+
+
+def test_dirichlet_mle_recovers_known_alpha():
+    """Sanity check the MLE itself, independent of the EM."""
+    from decontx.fast_ops import fit_dirichlet_2d
+
+    rng = np.random.default_rng(0)
+    for alpha in [(10.0, 10.0), (190.0, 12.0), (2.0, 50.0)]:
+        x = rng.dirichlet(alpha, size=20000)
+        est = fit_dirichlet_2d(x[:, 0].copy(), x[:, 1].copy(), np.array([1.0, 1.0]))
+        assert np.allclose(est, alpha, rtol=0.05), f"true {alpha}, estimated {est}"
+
+
+def test_counts_are_not_rounded():
+    """R returns fractional native counts; rounding would zero ~8% of nonzeros."""
+    result = _run_current()
+    counts = result.layers["decontX_counts"]
+    data = counts.data if hasattr(counts, "data") else np.asarray(counts).ravel()
+    assert not np.allclose(data, np.round(data)), "counts appear to be rounded"
+
+
+def test_no_degenerate_contamination_on_shallow_data():
+    """Low-count cells must not pin at exactly 0 or 1.
+
+    The old Beta-mode theta update produced a negative denominator once delta
+    fell below 1.0, which inverted low-count cells rather than merely saturating.
+    """
+    rng = np.random.default_rng(7)
+    X = rng.poisson(0.02, size=(400, 300)).astype(np.float64)
+    adata = ad.AnnData(csr_matrix(X))
+    adata.obs["leiden"] = pd.Categorical(np.repeat([1, 2, 3, 4], 100))
+    result = decontx.decontx(
+        adata, cluster_key="leiden", copy=True, verbose=False, max_iter=500
+    )
+    contam = result.obs["decontX_contamination"].values
+    n_pinned = int((contam == 0.0).sum() + (contam == 1.0).sum())
+    assert n_pinned < 20, f"{n_pinned}/400 cells pinned at exactly 0.0 or 1.0"
+
+
+def test_convergence_independent_of_iter_loglik():
+    """The stopping point must not depend on the diagnostic interval."""
+    from decontx.model import DecontXModel
+
+    adata, z = make_dataset()
+    z_int = np.ascontiguousarray(z, dtype=np.int32)
+    runs = {}
+    for il in (1, 5, 10):
+        model = DecontXModel(
+            max_iter=200, convergence=0.001, seed=12345, verbose=False, iter_loglik=il
+        )
+        res = model.fit_transform(adata.X, z_int)
+        runs[il] = (res["n_iter"], res["theta"])
+
+    assert len({n for n, _ in runs.values()}) == 1, (
+        f"n_iter varies with iter_loglik: {[(k, v[0]) for k, v in runs.items()]}"
+    )
+    base = runs[10][1]
+    for il, (_, theta) in runs.items():
+        assert np.array_equal(theta, base), f"theta differs at iter_loglik={il}"
+
+
+def _batched_fixture(batch_names, n_cells=200, n_genes=150, seed=0):
+    rng = np.random.default_rng(seed)
+    X = rng.poisson(2, size=(n_cells, n_genes)).astype(np.float64)
+    X[X < 1] = 0
+    adata = ad.AnnData(csr_matrix(X))
+    adata.obs["leiden"] = pd.Categorical(np.repeat([1, 2, 3, 4], n_cells // 4))
+    adata.obs["batch"] = pd.Categorical(batch_names)
+    return adata, X
+
+
+def test_multibatch_preserves_row_order():
+    """AGENTS.md item 5: multi-batch must reassemble in original cell order.
+
+    Batches are interleaved so batch_indices are non-contiguous, which is the
+    case a naive vstack would silently get wrong.
+    """
+    n_cells = 200
+    batch = np.array(["A" if i % 2 == 0 else "B" for i in range(n_cells)])
+    adata, X = _batched_fixture(batch, n_cells=n_cells)
+
+    result = decontx.decontx(
+        adata, cluster_key="leiden", batch_key="batch", copy=True, verbose=False
+    )
+    got = result.layers["decontX_counts"].toarray()
+
+    # Seed-independent: a row permutation would move nonzeros to other columns.
+    assert np.array_equal((got != 0), (X != 0)), "sparsity pattern does not align"
+
+    # Exact: rerun each batch standalone with the same derived child seed.
+    z = np.repeat([1, 2, 3, 4], n_cells // 4)
+    child_seeds = [
+        int(s.generate_state(1)[0] % (2**31 - 1))
+        for s in np.random.SeedSequence(12345).spawn(2)
+    ]
+    for b, batch_seed in zip(("A", "B"), child_seeds):
+        mask = batch == b
+        sub = ad.AnnData(csr_matrix(X[mask]))
+        sub.obs["leiden"] = pd.Categorical(z[mask])
+        ref = decontx.decontx(
+            sub, cluster_key="leiden", copy=True, verbose=False, seed=batch_seed
+        )
+        assert np.allclose(got[mask], ref.layers["decontX_counts"].toarray()), (
+            f"batch {b} rows are not in original order"
+        )
+
+
+def test_multibatch_uses_distinct_seeds_per_batch():
+    """Every batch sharing one seed gave an identical theta init prefix."""
+    n_cells = 200
+    half = np.array(["A"] * (n_cells // 2) + ["B"] * (n_cells // 2))
+    adata, _ = _batched_fixture(half, n_cells=n_cells)
+    result = decontx.decontx(
+        adata, cluster_key="leiden", batch_key="batch", copy=True, verbose=False
+    )
+    assert "decontX_contamination" in result.obs
+
+    child_seeds = [
+        int(s.generate_state(1)[0] % (2**31 - 1))
+        for s in np.random.SeedSequence(12345).spawn(2)
+    ]
+    assert child_seeds[0] != child_seeds[1], "batches received identical seeds"
+
+
+def test_batch_named_all_does_not_collide_with_sentinel():
+    """A batch literally named "all" must not be read as the single-batch case."""
+    n_cells = 200
+    named = np.array(["all"] * (n_cells // 2) + ["zzz"] * (n_cells // 2))
+    control = np.array(["aaa"] * (n_cells // 2) + ["zzz"] * (n_cells // 2))
+
+    adata_named, _ = _batched_fixture(named, n_cells=n_cells)
+    adata_ctrl, _ = _batched_fixture(control, n_cells=n_cells)
+
+    kw = {
+        "cluster_key": "leiden",
+        "batch_key": "batch",
+        "copy": True,
+        "verbose": False,
+    }
+    delta_named = decontx.decontx(adata_named, **kw).uns["decontX"]["fitted"]["delta"]
+    delta_ctrl = decontx.decontx(adata_ctrl, **kw).uns["decontX"]["fitted"]["delta"]
+
+    assert np.allclose(delta_named, delta_ctrl), (
+        f'batch named "all" gave delta {delta_named}, control gave {delta_ctrl}'
+    )
+
+
+def test_nan_batch_labels_raise():
+    """NaN batch labels used to crash with IndexError or TypeError."""
+    n_cells = 200
+    adata, _ = _batched_fixture(np.array(["A"] * n_cells), n_cells=n_cells)
+
+    for values in (
+        np.array(["A"] * (n_cells - 3) + [None] * 3, dtype=object),
+        np.where(np.arange(n_cells) < 3, np.nan, 1.0),
+    ):
+        a = adata.copy()
+        a.obs["batch"] = values
+        with pytest.raises(ValueError, match="missing value"):
+            decontx.decontx(
+                a, cluster_key="leiden", batch_key="batch", copy=True, verbose=False
+            )
+
+
+def test_cluster_labels_round_trip():
+    """obs['decontX_clusters'] must carry the user's labels, not internal codes."""
+    n_cells = 200
+    rng = np.random.default_rng(0)
+    X = rng.poisson(2, size=(n_cells, 150)).astype(np.float64)
+
+    # Lexicographic sorting used to renumber "10" -> 2 and "2" -> 3.
+    labels_str = np.array([str(i % 11) for i in range(n_cells)])
+    # The integer path used to shift rather than compact: [0,5,9,12] -> [1,6,10,13].
+    labels_int = np.repeat([0, 5, 9, 12], n_cells // 4)
+
+    for labels, cast in ((labels_str, str), (labels_int, int)):
+        adata = ad.AnnData(csr_matrix(X))
+        adata.obs["leiden"] = pd.Categorical(labels)
+        result = decontx.decontx(adata, cluster_key="leiden", copy=True, verbose=False)
+        got = result.obs["decontX_clusters"].astype(cast).values
+        assert np.array_equal(got, labels), f"labels did not round-trip: {got[:5]}"
+        assert set(result.uns["decontX"]["cluster_map"]) == {
+            str(x) for x in np.unique(labels)
+        }
+
+
+def test_uns_metadata_is_merged_not_clobbered():
+    """_store_metadata runs last; a wholesale assignment would drop cluster_map."""
+    result = _run_current()
+    uns = result.uns["decontX"]
+    for key in ("parameters", "fitted", "cluster_map", "runtime", "version"):
+        assert key in uns, f"uns['decontX'] missing {key}"
+    assert uns["parameters"]["delta"] == [10.0, 10.0], (
+        "parameters.delta should hold the caller's input, not the fitted value"
+    )
+
+
+def test_log_transformed_input_is_rejected():
+    """DecontX is a count model; log-normalized input must not run silently."""
+    import scanpy as sc
+
+    rng = np.random.default_rng(0)
+    adata = ad.AnnData(csr_matrix(rng.poisson(3, size=(200, 150)).astype(np.float64)))
+    adata.obs["leiden"] = pd.Categorical(np.repeat([1, 2, 3, 4], 50))
+    sc.pp.normalize_total(adata)
+    sc.pp.log1p(adata)
+
+    with pytest.raises(ValueError, match="log-transformed"):
+        decontx.decontx(adata, cluster_key="leiden", copy=True, verbose=False)
+
+
+def test_restored_raw_counts_are_accepted_after_clustering():
+    """uns['log1p'] lingers after restoring counts; that must not block the run.
+
+    Rejecting on uns['log1p'] alone would break the standard workflow of
+    clustering on normalized data and then putting raw counts back into .X.
+    """
+    import scanpy as sc
+
+    rng = np.random.default_rng(0)
+    counts = csr_matrix(rng.poisson(3, size=(200, 150)).astype(np.float64))
+    adata = ad.AnnData(counts.copy())
+    adata.layers["counts"] = counts.copy()
+    adata.obs["leiden"] = pd.Categorical(np.repeat([1, 2, 3, 4], 50))
+
+    sc.pp.normalize_total(adata)
+    sc.pp.log1p(adata)
+    assert "log1p" in adata.uns
+
+    adata.X = adata.layers["counts"].copy()
+    result = decontx.decontx(adata, cluster_key="leiden", copy=True, verbose=False)
+    assert "decontX_counts" in result.layers

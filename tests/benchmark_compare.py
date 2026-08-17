@@ -145,10 +145,18 @@ print(json.dumps(out))
 
 
 def main():
-    mine_path = "/home/siamsoha/Documents/SIAM/Github/decontx-python"
-    jjia1_path = (
-        "/home/siamsoha/Downloads/decontx-python-master_jjia1/decontx-python-master"
+    # Both paths were hardcoded to one machine. Default to this checkout and let
+    # the reference implementation be pointed at via the environment.
+    mine_path = os.environ.get(
+        "DECONTX_PATH", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     )
+    jjia1_path = os.environ.get("DECONTX_JJIA1_PATH")
+    if not jjia1_path or not os.path.isdir(jjia1_path):
+        raise SystemExit(
+            "Set DECONTX_JJIA1_PATH to a checkout of jjia1/decontx-python "
+            "(the directory containing the 'decontx' package).\n"
+            "  DECONTX_JJIA1_PATH=/path/to/decontx-python python tests/benchmark_compare.py"
+        )
 
     configs = [
         (500, 500, 4, 0.15, 100),

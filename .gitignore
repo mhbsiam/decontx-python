@@ -1,0 +1,33 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Numba JIT cache (cache=True writes these next to the source)
+*.nbc
+*.nbi
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test and coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Tooling caches
+.ruff_cache/
+.mypy_cache/
+
+# Scratch data dropped by benchmark and coverage harnesses
+ds.npy
+ds.pkl
+
+# Environments
+.venv/
+venv/

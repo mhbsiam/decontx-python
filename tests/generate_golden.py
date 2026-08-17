@@ -11,7 +11,7 @@ import os
 
 import anndata as ad
 import numpy as np
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, issparse
 
 import decontx
 
@@ -91,6 +91,8 @@ def main():
 
     contamination = result.obs["decontX_contamination"].values
     decontx_counts = result.layers["decontX_counts"]
+    if issparse(decontx_counts):
+        decontx_counts = decontx_counts.toarray()
 
     from decontx.model import DecontXModel
 

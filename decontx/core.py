@@ -9,6 +9,7 @@ import pandas as pd
 from anndata import AnnData
 from scipy.sparse import csr_matrix, issparse, vstack
 
+from .fast_ops import all_integral
 from .model import DecontXModel
 
 
@@ -24,6 +25,8 @@ def decontx(
     copy: bool = False,
     verbose: bool = True,
     compute_log_likelihood: bool = True,
+    dtype: str = "float64",
+    round_counts: bool = False,
 ) -> Optional[AnnData]:
     """Remove ambient RNA contamination from single-cell RNA-seq data.
 
@@ -47,8 +50,8 @@ def decontx(
     if cluster_key not in adata.obs:
         raise KeyError(f"Cluster key '{cluster_key}' not found in adata.obs")
 
-    z_labels = adata.obs[cluster_key].values
-    z_labels = _process_cluster_labels(z_labels)
+    original_labels = adata.obs[cluster_key].values
+    z_labels, label_map = _process_cluster_labels(original_labels)
 
     if verbose:
         n_clusters = len(np.unique(z_labels))
@@ -59,8 +62,18 @@ def decontx(
         if batch_key not in adata.obs:
             raise KeyError(f"Batch key '{batch_key}' not found in adata.obs")
 
-        batch_labels = adata.obs[batch_key].values
-        unique_batches = np.unique(batch_labels)
+        # Cast to object and use pd.unique: np.unique raises TypeError on
+        # mixed str/float (a categorical or object column carrying NaN), and
+        # silently produces an unmatchable NaN "batch" on a float column.
+        batch_series = pd.Series(np.asarray(adata.obs[batch_key].values, dtype=object))
+        if batch_series.isna().any():
+            n_missing = int(batch_series.isna().sum())
+            raise ValueError(
+                f"Batch key '{batch_key}' has {n_missing} missing value(s). "
+                "Assign every cell to a batch or subset them out before running."
+            )
+        batch_labels = batch_series.to_numpy()
+        unique_batches = pd.unique(batch_labels)
 
         if verbose:
             print(f"Processing {len(unique_batches)} batches separately")
@@ -77,6 +90,8 @@ def decontx(
             seed,
             verbose,
             compute_log_likelihood,
+            dtype,
+            round_counts,
         )
     else:
         if verbose:
@@ -92,12 +107,16 @@ def decontx(
             seed,
             verbose,
             compute_log_likelihood,
+            dtype,
+            round_counts,
         )
         results = {"all": result}
 
-    _store_results(adata, results, z_labels, cluster_key, batch_key)
+    _store_results(adata, results, original_labels, cluster_key, batch_key)
 
-    if "all" in results:
+    # Discriminate on batch_key, not on the "all" key: a real batch can be
+    # named "all" and would otherwise be mistaken for the single-batch sentinel.
+    if batch_key is None:
         fitted_delta = results["all"]["delta"]
     else:
         fitted_delta = np.mean(
@@ -107,7 +126,15 @@ def decontx(
         fitted_delta = np.asarray(fitted_delta)
 
     _store_metadata(
-        adata, fitted_delta, estimate_delta, max_iter, convergence, seed, start_time
+        adata,
+        delta,
+        fitted_delta,
+        estimate_delta,
+        max_iter,
+        convergence,
+        seed,
+        start_time,
+        label_map,
     )
 
     if verbose:
@@ -137,6 +164,31 @@ def _validate_inputs(adata: AnnData, cluster_key: str, batch_key: Optional[str])
         if np.any(np.isnan(adata.X)):
             raise ValueError("Count matrix contains NaN values")
 
+    # DecontX is a count model. Log-normalized input produces plausible-looking
+    # but meaningless output.
+    #
+    # Integrality is the real evidence, not uns['log1p']: restoring raw counts
+    # into .X after clustering leaves that key behind, and rejecting on it alone
+    # would break the standard workflow. Raise only when both signals agree.
+    data = adata.X.data if issparse(adata.X) else np.asarray(adata.X).ravel()
+    is_integral = data.size == 0 or all_integral(
+        np.ascontiguousarray(data, dtype=np.float64)
+    )
+
+    if not is_integral:
+        if "log1p" in adata.uns:
+            raise ValueError(
+                "adata.X has non-integer values and adata.uns['log1p'] is set, so "
+                "it appears to be log-transformed. DecontX requires raw counts: "
+                "pass the counts layer (e.g. adata.X = adata.layers['counts']) "
+                "or run DecontX before normalizing."
+            )
+        warnings.warn(
+            "adata.X contains non-integer values. DecontX expects raw counts; "
+            "normalized or transformed data will give unreliable results.",
+            stacklevel=2,
+        )
+
     if adata.n_obs < 10:
         warnings.warn(
             "Very few cells (<10) detected. Results may be unreliable.",
@@ -150,26 +202,22 @@ def _validate_inputs(adata: AnnData, cluster_key: str, batch_key: Optional[str])
         )
 
 
-def _process_cluster_labels(z: np.ndarray) -> np.ndarray:
-    """Convert cluster labels to sequential integers starting from 1."""
+def _process_cluster_labels(z: np.ndarray) -> Tuple[np.ndarray, dict]:
+    """Convert cluster labels to sequential integers starting from 1.
+
+    Return the remapped labels and the original->internal mapping. The integer
+    path used to shift by the minimum rather than compact, which left gaps
+    (e.g. [0, 5, 9] -> [1, 6, 10]); np.unique is already sorted, so one
+    compaction path is correct for every dtype.
+    """
     z = np.asarray(z)
 
     unique_labels = np.unique(z)
     if len(unique_labels) < 2:
         raise ValueError("Need at least 2 clusters for decontamination")
 
-    if not np.issubdtype(z.dtype, np.integer):
-        label_map = {label: i + 1 for i, label in enumerate(unique_labels)}
-        z = np.array([label_map[x] for x in z])
-    else:
-        min_label = np.min(z)
-        if min_label <= 0:
-            z = z - min_label + 1
-        elif min_label > 1:
-            label_map = {label: i + 1 for i, label in enumerate(np.sort(unique_labels))}
-            z = np.array([label_map[x] for x in z])
-
-    return z.astype(int)
+    label_map = {label: i + 1 for i, label in enumerate(unique_labels)}
+    return np.array([label_map[x] for x in z]).astype(int), label_map
 
 
 def _process_batches(
@@ -184,11 +232,21 @@ def _process_batches(
     seed: int,
     verbose: bool,
     compute_log_likelihood: bool,
+    dtype: str = "float64",
+    round_counts: bool = False,
 ) -> dict:
     """Process each batch separately."""
     batch_results = {}
 
-    for batch in unique_batches:
+    # Distinct child seed per batch. Passing the same seed to every batch makes
+    # beta.rvs emit an identical theta init prefix, correlating fits that are
+    # meant to be independent.
+    child_seeds = [
+        int(s.generate_state(1)[0] % (2**31 - 1))
+        for s in np.random.SeedSequence(seed).spawn(len(unique_batches))
+    ]
+
+    for batch, batch_seed in zip(unique_batches, child_seeds):
         if verbose:
             print(f"  Processing batch '{batch}'...")
 
@@ -209,9 +267,11 @@ def _process_batches(
             delta,
             estimate_delta,
             convergence,
-            seed,
+            batch_seed,
             verbose=False,
             compute_log_likelihood=compute_log_likelihood,
+            dtype=dtype,
+            round_counts=round_counts,
         )
 
         result["batch_indices"] = batch_indices
@@ -235,6 +295,8 @@ def _run_decontx_single(
     seed: int,
     verbose: bool = True,
     compute_log_likelihood: bool = True,
+    dtype: str = "float64",
+    round_counts: bool = False,
 ) -> dict:
     """Run DecontX on a single batch."""
     model = DecontXModel(
@@ -245,6 +307,8 @@ def _run_decontx_single(
         seed=seed,
         verbose=verbose,
         compute_log_likelihood=compute_log_likelihood,
+        dtype=dtype,
+        round_counts=round_counts,
     )
 
     result = model.fit_transform(X, z_labels)
@@ -254,7 +318,7 @@ def _run_decontx_single(
 def _store_results(
     adata: AnnData,
     results: dict,
-    z_labels: np.ndarray,
+    original_labels: np.ndarray,
     cluster_key: str,
     batch_key: Optional[str],
 ):
@@ -262,13 +326,14 @@ def _store_results(
     n_cells = adata.n_obs
     n_genes = adata.n_vars
 
-    if len(results) == 1 and "all" in results:
+    if batch_key is None:
         result = results["all"]
         adata.layers["decontX_counts"] = result["decontaminated_counts"]
         adata.obs["decontX_contamination"] = result["contamination"]
     else:
         # Multiple batches: stack sparse results in original cell order.
         contamination = np.zeros(n_cells)
+        covered = np.zeros(n_cells, dtype=bool)
         batch_matrices = {}
 
         for batch_name, result in results.items():
@@ -279,6 +344,14 @@ def _store_results(
                     result["decontaminated_counts"],
                 )
                 contamination[batch_indices] = result["contamination"]
+                covered[batch_indices] = True
+
+        # Without this, uncovered cells would silently keep contamination 0.0.
+        if not covered.all():
+            raise RuntimeError(
+                f"{int((~covered).sum())} cell(s) were not assigned to any batch; "
+                "cannot assemble decontaminated counts."
+            )
 
         ordered = sorted(batch_matrices.values(), key=lambda x: x[0][0])
         if ordered:
@@ -292,35 +365,53 @@ def _store_results(
         adata.layers["decontX_counts"] = decontx_counts
         adata.obs["decontX_contamination"] = contamination
 
-    adata.obs["decontX_clusters"] = pd.Categorical(z_labels)
+    # Store the user's own labels. Writing the internal 1..K codes here silently
+    # renumbered string clusters lexicographically ("10" -> 2, "2" -> 3), so the
+    # column could not be joined against the source cluster column.
+    adata.obs["decontX_clusters"] = pd.Categorical(original_labels)
 
 
 def _store_metadata(
     adata: AnnData,
-    delta: np.ndarray,
+    input_delta: Tuple[float, float],
+    fitted_delta: np.ndarray,
     estimate_delta: bool,
     max_iter: int,
     convergence: float,
     seed: int,
     start_time: datetime,
+    label_map: dict,
 ):
-    """Store run parameters and metadata."""
+    """Store run parameters and metadata.
+
+    Merge into any existing uns['decontX'] rather than replacing it: this runs
+    after _store_results, so a wholesale assignment would discard whatever that
+    wrote.
+    """
     end_time = datetime.now()
 
-    metadata = {
-        "parameters": {
-            "delta": list(delta),
-            "estimate_delta": estimate_delta,
-            "max_iter": max_iter,
-            "convergence": convergence,
-            "seed": seed,
-        },
-        "runtime": {
-            "start_time": start_time.isoformat(),
-            "end_time": end_time.isoformat(),
-            "duration_seconds": (end_time - start_time).total_seconds(),
-        },
-        "version": "0.2.0",
-    }
+    metadata = dict(adata.uns.get("decontX", {}))
+    metadata.update(
+        {
+            "parameters": {
+                # The value the caller passed in, not the fitted one.
+                "delta": list(input_delta),
+                "estimate_delta": estimate_delta,
+                "max_iter": max_iter,
+                "convergence": convergence,
+                "seed": seed,
+            },
+            "fitted": {
+                "delta": list(np.asarray(fitted_delta)),
+            },
+            "cluster_map": {str(k): int(v) for k, v in label_map.items()},
+            "runtime": {
+                "start_time": start_time.isoformat(),
+                "end_time": end_time.isoformat(),
+                "duration_seconds": (end_time - start_time).total_seconds(),
+            },
+            "version": "0.2.0",
+        }
+    )
 
     adata.uns["decontX"] = metadata
